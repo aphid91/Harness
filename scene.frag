@@ -387,7 +387,7 @@ float sdVesicaSegment( in vec3 p, in vec3 a, in vec3 b, in float w )
 //PHYSICS EMISSION HERE
 
 
-#define alpha -1.
+#define alpha 1.
 #define angles COPY_ROT.xyz*PI
 float t_schedule(float x){
 x/=PI*2;
@@ -473,11 +473,6 @@ MR scene(vec3 p,float phase){
     //return sdFish(p,phase);
     //if(phase<-1.7){return MR(99999,vec4(0));}//kill the small ones
     p.xyz+=COPY_POS*15;//vec3(-.6144,.0024,.0554)*vec3(10,10,1)+vec3(0,0,1.2);//+vec3(0,0,3*min(1.5,time));
-    vec3 physp;
-    mat3 physr;
-    astroA(phase,physp,physr);
-    p+=physp;
-    p = physr*p;
     pR(p.xz,dials3.z);
     vec3 op = p;
     #define suit_mat vec4(.02,.01,.01,.12)
@@ -525,7 +520,7 @@ MR map(vec3 p){
     //pR(p.xy,PI/2);
     vec3 op = p;
     p/=pow(scal,t);
-    p = baseRot*p;//pR(p.xz,alpha*t);
+    p = baseRot*p;
     MR result = MR(999, vec4(0));
     
     vec3 mp = p;
@@ -539,7 +534,8 @@ MR map(vec3 p){
     #ifdef COPIES
     for(int i = 0;i<4;i++){
         mp/=scal;
-        mp = fullRot*mp;//pR(mp.xz,alpha);
+        mp = fullRot*mp;
+        vec3 prephys = mp;
         float phase = alpha*(t+i+1);
             vec3 physp;
             mat3 physr;
@@ -547,13 +543,15 @@ MR map(vec3 p){
             mp-=physp;
             mp = mp*physr;
         MR small = scenebb(mp,phase,i+1);
+        mp=prephys;
         small.dts*=pow(scal,i+1);
-        result=mapMin(result,small);//,.1*pow(scal,i));
+        result=mapMin(result,small);
     }
     mp=p;
     for(int i = 0;i<4;i++){
         mp*=scal;
-        mp = transpose(fullRot)*mp;//pR(mp.xz,-alpha);
+        mp = transpose(fullRot)*mp;
+        vec3 prephys = mp;
         float phase = alpha*(t-i-1);
             vec3 physp;
             mat3 physr;
@@ -561,13 +559,15 @@ MR map(vec3 p){
             mp-=physp;
             mp = mp*physr;
         MR big = scenebb(mp,phase,-1-i);
+        mp = prephys;
         big.dts/=pow(scal,i+1);
-        result = mapMin(result,big);//,.021/pow(scal,i+1));
+        result = mapMin(result,big);
     }
     #endif
-    if(result.dts>3.){result.dts=pow(scal,t)*(result.dts-1.);return result;}//bounding box
+    if(result.dts>3.||true){result.dts=pow(scal,t)*(result.dts-1.);result.mat=vec4(.2);return result;}//bounding box
     
     float ascal = pow(scal,-result.mat.x);
+    float phase = alpha*(t+result.mat.x);
     mat3 arot = mat3(1,0,0,0,1,0,0,0,1);
     //if(abs(result.mat.x)>0){arot = fullRot;}
     for(int i = 0;i<abs(result.mat.x);i++){
@@ -577,10 +577,10 @@ MR map(vec3 p){
     mp=p;
     mp*=ascal;
     mp = arot * mp;
-            astroA(alpha*t,physp,physr);
+            astroA(phase,physp,physr);
             mp-=physp;
             mp = mp*physr;
-    MR astro = scene(mp,alpha*t);
+    MR astro = scene(mp,phase);
     astro.dts/=ascal;
     result = astro;
     

@@ -79,11 +79,12 @@ def compile_shader(ctx, vbo, bodies, schedule, names):
     except FileNotFoundError:
         return None, None, f"{FRAG_PATH} not found"
 
-    # Build sorted schedule as tuples for the engine
-    sched_sorted = sorted(
-        [(entry[0], entry[1]) for entry in schedule],
-        key=lambda e: e[0],
-    )
+    # Build sorted schedule as tuples for the engine.
+    # Ensure a None anchor exists at the earliest time so build_segments
+    # starts from the right point (supports negative times).
+    events = [(entry[0], entry[1]) for entry in schedule if entry[1] is not None]
+    t_min = min((e[0] for e in events), default=0.0)
+    sched_sorted = sorted([(t_min, None)] + events, key=lambda e: e[0])
 
     try:
         physics_glsl = emit_scene(bodies, sched_sorted, names)
@@ -171,13 +172,20 @@ def main():
 
     # --- scene state ---
     bodies, names, schedule = make_default_scene()
-    t_reset = glfw.get_time()
     dials = [0.0] * 16
     program = None
     vao = None
     compile_error = "Press R or Refresh to compile"
     r_was_pressed = False
+    g_was_pressed = False
     delete_index = -1  # deferred deletion
+    time_speed = 1.0
+    paused = False
+    anim_time = 0.0        # accumulated animation time
+    last_wall = glfw.get_time()
+    mouse_look = True      # when False, mouse uniform is frozen
+    locked_mouse = (0.5, 0.5)
+    rclick_was_pressed = False
 
     # --- main loop ---
     while not glfw.window_should_close(window):
@@ -186,7 +194,12 @@ def main():
         imgui.new_frame()
 
         # Time and mouse
-        t_now = glfw.get_time() - t_reset
+        wall_now = glfw.get_time()
+        wall_dt = wall_now - last_wall
+        last_wall = wall_now
+        if not paused:
+            anim_time += wall_dt * time_speed
+        t_now = anim_time
         w, h = glfw.get_framebuffer_size(window)
         mx, my = glfw.get_cursor_pos(window)
         mouse_norm = (mx / max(w, 1), 1.0 - my / max(h, 1))
@@ -196,6 +209,12 @@ def main():
         # ================================================================
         imgui.begin("Controls")
 
+        # Time speed slider
+        changed, time_speed = imgui.slider_float("Speed", time_speed, -5.0, 5.0)
+        pause_label = "PAUSED (G)" if paused else "Playing (G)"
+        imgui.same_line()
+        imgui.text(pause_label)
+
         if imgui.button("Refresh Animation"):
             program, vao, compile_error = compile_shader(
                 ctx, vbo, bodies, schedule, names
@@ -203,7 +222,7 @@ def main():
 
         imgui.same_line()
         if imgui.button("Reset Time"):
-            t_reset = glfw.get_time()
+            anim_time = 0.0
 
         imgui.text(f"Time: {t_now:.2f}    FPS: {io.framerate:.0f}")
 
@@ -219,10 +238,27 @@ def main():
                 for j in range(4):
                     idx = bank * 4 + j
                     changed, val = imgui.slider_float(
-                        f"##{bank}_{j}", dials[idx], -10.0, 10.0
+                        f"##{bank}_{j}", dials[idx], -1.0, 1.0
                     )
                     if changed:
                         dials[idx] = val
+
+        imgui.separator()
+        if imgui.button("Dump Compiled Shader"):
+            try:
+                with open(FRAG_PATH) as _f:
+                    _frag_src = _f.read()
+                events = [(entry[0], entry[1]) for entry in schedule if entry[1] is not None]
+                _t_min = min((e[0] for e in events), default=0.0)
+                _sched = sorted([(_t_min, None)] + events, key=lambda e: e[0])
+                _physics = emit_scene(bodies, _sched, names)
+                _full = _frag_src.replace(EMISSION_MARKER, _physics)
+                _dump_path = "outputs/scene_dump.frag"
+                with open(_dump_path, "w") as _df:
+                    _df.write(_full)
+                compile_error = f"Dumped to {_dump_path}"
+            except Exception as _e:
+                compile_error = f"Dump failed: {_e}"
 
         imgui.end()
 
@@ -252,10 +288,10 @@ def main():
         display.sort(key=lambda x: x[1][0])
 
         delete_index = -1
-        for di, (sched_idx, entry) in enumerate(display):
+        for sched_idx, entry in display:
             ev = entry[1]
             label = f"t={entry[0]:.3f}  {_event_label(ev, names)}"
-            imgui.push_id(di)
+            imgui.push_id(sched_idx)
 
             # Selectable row — click opens popup
             if imgui.selectable(label, False)[0]:
@@ -271,7 +307,7 @@ def main():
                 imgui.separator()
 
                 # Time
-                changed, new_t = imgui.drag_float("Time", entry[0], 0.01, 0.0, 100.0)
+                changed, new_t = imgui.drag_float("Time", entry[0], 0.01, -100.0, 100.0)
                 if changed:
                     entry[0] = new_t
 
@@ -323,11 +359,25 @@ def main():
         # ================================================================
         r_pressed = glfw.get_key(window, glfw.KEY_R) == glfw.PRESS
         if r_pressed and not r_was_pressed and not io.want_capture_keyboard:
-            t_reset = glfw.get_time()
+            anim_time = 0.0
             program, vao, compile_error = compile_shader(
                 ctx, vbo, bodies, schedule, names
             )
         r_was_pressed = r_pressed
+
+        # G key — toggle pause
+        g_pressed = glfw.get_key(window, glfw.KEY_G) == glfw.PRESS
+        if g_pressed and not g_was_pressed and not io.want_capture_keyboard:
+            paused = not paused
+        g_was_pressed = g_pressed
+
+        # Right-click — toggle mouse look
+        rclick_pressed = glfw.get_mouse_button(window, glfw.MOUSE_BUTTON_RIGHT) == glfw.PRESS
+        if rclick_pressed and not rclick_was_pressed and not io.want_capture_mouse:
+            mouse_look = not mouse_look
+            if not mouse_look:
+                locked_mouse = mouse_norm
+        rclick_was_pressed = rclick_pressed
 
         # ================================================================
         # Render
@@ -337,7 +387,8 @@ def main():
 
         if program is not None and vao is not None:
             set_uniform(program, "resolution", (float(w), float(h)))
-            set_uniform(program, "mouse", (float(mouse_norm[0]), float(mouse_norm[1])))
+            mval = mouse_norm if mouse_look else locked_mouse
+            set_uniform(program, "mouse", (float(mval[0]), float(mval[1])))
             set_uniform(program, "time", float(t_now))
             set_uniform(program, "dials",  tuple(dials[0:4]))
             set_uniform(program, "dials2", tuple(dials[4:8]))
