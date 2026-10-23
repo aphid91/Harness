@@ -4,7 +4,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Logar is an analytic physics engine that precomputes rigid-body motion in Python and emits GLSL shader functions for real-time playback. Instead of running physics each frame on the GPU, it bakes piecewise-analytic trajectories (position via constant-acceleration kinematics, rotation via Rodrigues formula) into GLSL `if/else` chains over time segments.
+A minimal moderngl harness — a starting point for shader/visual projects. It opens a
+GLFW window, renders [shader.frag](shader.frag) on a fullscreen quad via moderngl, and
+overlays an imgui control panel. There is no application logic beyond that; the point
+is to be the smallest useful scaffold to build on.
 
 ## Commands
 
@@ -12,30 +15,46 @@ Logar is an analytic physics engine that precomputes rigid-body motion in Python
 # Activate venv (Python 3.13)
 .venv\Scripts\activate
 
-# Run the demo scene (outputs GLSL to outputs/scene.glsl and prints self-check results)
-python test_demo.py
+# Install deps (already present in .venv)
+pip install -r requirements.txt
+
+# Run
+python app.py
 ```
 
-There is no build step, linter, or test framework configured. `test_demo.py` serves as both demo and validation — it asserts segment evaluation matches stepwise ground-truth simulation (`max abs error < 1e-10`) and prints continuity checks at event boundaries.
+No build step, linter, or test framework is configured.
 
 ## Architecture
 
-**Single-file engine** — all physics and code generation live in [engine.py](engine.py).
+Everything lives in [app.py](app.py):
 
-The pipeline has three stages:
+- **Window/events**: GLFW, requesting an OpenGL 3.3 core profile. vsync on via
+  `swap_interval(1)`.
+- **Rendering**: a moderngl context draws a 4-vertex `TRIANGLE_STRIP` covering clip
+  space (`vbo`), with the vertex shader inlined as `VERT_SHADER` and the fragment
+  shader read from `shader.frag` at reload time.
+- **UI**: `imgui_bundle` with the `GlfwRenderer` backend. The imgui frame is built
+  mid-loop (`new_frame` → widgets → `render`), but `renderer.render(...)` is called
+  *after* the scene draw so the UI composites on top.
+- **Docking**: enabled via `ConfigFlags_.docking_enable` plus a
+  `dock_space_over_viewport()` call right after `new_frame()`. The
+  `passthru_central_node` flag keeps the central node transparent so the shader shows
+  through where nothing is docked — without it the dockspace paints over the scene.
+  The flag alone does nothing; the dockspace call is what makes panels dockable.
+- **Shader reload**: `compile_shader()` returns `(prog, vao, error)` rather than
+  raising, so a GLSL syntax error leaves the previous working program on screen and
+  shows the compiler message in the UI. Triggered by `R` or the Reload button.
+- **Uniforms**: `set_uniform()` checks `name in prog` before assigning. GLSL compilers
+  drop unused uniforms, so this lets the harness offer `resolution`, `mouse`, and
+  `time` without requiring every shader to declare them.
+- **Input gating**: keyboard shortcuts check `io.want_capture_keyboard` so typing in an
+  imgui field doesn't fire them. Do the same (`io.want_capture_mouse`) for any mouse
+  shortcuts added later.
 
-1. **Scene definition**: Create `Body` dataclasses (pos, vel, rot, omega, mass, inertia, force) and a time-sorted `schedule` of `(t, event)` tuples. Events are either `impulse(body_i, J, r_body)` (instantaneous momentum change with angular coupling via lever arm) or `set_force(body_i, F)` (change the constant force on a body).
+## Conventions
 
-2. **Segment building** (`build_segments`): Walks the schedule chronologically, advancing bodies between events with `advance()` (constant-acceleration position + Rodrigues rotation). Produces `segments[body_i]` — a list of `Segment` objects, each capturing the initial state and acceleration for one time interval.
-
-3. **GLSL emission** (`emit_scene` / `emit_body_glsl`): Converts each body's segment list into a GLSL function `void name(float t, out vec3 pos, out mat3 rot)` containing a branching chain over time. Position uses `p0 + v0*dt + 0.5*a*dt²`; rotation reconstructs the Rodrigues matrix in-shader when omega is nonzero, or emits a constant `mat3` when the body isn't spinning.
-
-Key physics conventions:
-- Between events: constant linear acceleration (`F/m`), constant angular velocity (no torque)
-- Impulses apply to both linear velocity (`J/m`) and angular velocity (`cross(r_world, J) / inertia`) where `r_body` is in body frame at event time
-- GLSL `mat3` is column-major; `_mat3()` handles the transpose
-- All rotation math uses world-frame angular velocity and the Rodrigues rotation formula
-
-## Output
-
-Generated GLSL goes to [outputs/](outputs/). Each body becomes a standalone function suitable for pasting into a fragment shader — the caller provides `t` (animation time) and gets back `pos` and `rot`.
+- Time is accumulated manually (`anim_time += wall_dt * time_speed`) rather than read
+  from `glfw.get_time()`, so pause and speed scaling work. Pass `anim_time` to shaders,
+  not wall time.
+- `mouse` is normalised to 0..1 with y flipped to point up, matching GLSL convention.
+- `imgui.ini` (saved window layout) is generated at runtime and gitignored.
